@@ -42,6 +42,7 @@ async function monitorDeposit(depositId) {
     const seen = new Set();
 
     while (Date.now() - start < MAX_MONITOR_TIME) {
+      console.log(`Checking for deposit matches for ID: ${depositId}`); // Log message
         try {
             const transactions = await getTransactions();
             transactions.forEach(tx => {
@@ -76,7 +77,7 @@ app.post('/deposit', (req, res) => {
         success: true,
         depositId,
         depositAddress: DEPOSIT_ADDRESS,
-        message: `Monitoring ${amount} USDT from ${address} for 5 minutes.`
+        message: `Send EXACTLY ${amount} USDT from ${address} to ${DEPOSIT_ADDRESS}`
     });
 });
 
