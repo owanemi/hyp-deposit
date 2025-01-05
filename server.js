@@ -6,15 +6,17 @@ const app = express();
 const port = 3000;
 
 // CONTRACT CONFIG
-const CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'; // USDT CONTRACT ADDRESS
-const DEPOSIT_ADDRESS = 'TMDBGskDMtzA6MXSLrmxHPjwmPk6hsLVpJ'; // Your deposit address
+const CONTRACT = 'TQM1am5Ssf8phTwnoey1GMfHbM6CEeei72'; // USDT CONTRACT ADDRESS
+const DEPOSIT_ADDRESS = 'TMDBGskDMtzA6MXSLrmxHPjwmPk6hsLVpJ'; 
 
 // POLLING CONFIG
 const POLL_INTERVAL = 0.5; // Poll every 30 seconds
-const TRANSACTIONS_URL = `https://api.trongrid.io/v1/accounts/${DEPOSIT_ADDRESS}/transactions/trc20?contract_address=${CONTRACT}`;
-const ACCOUNT_URL = `https://apilist.tronscan.org/api/account?address=${DEPOSIT_ADDRESS}&includeToken=true`;
+const MAX_MONITORING_TIME = 5 * 60 * 1000; // 5 minutes in milliseconds
+const TRANSACTIONS_URL = `https://api.shasta.trongrid.io/v1/accounts/${DEPOSIT_ADDRESS}/transactions/trc20?contract_address=${CONTRACT}`;
 
-const seenTransactions = new Set();
+// Store pending and matched deposits
+const pendingDeposits = new Map(); // Store expected deposits
+const matchedTransactions = new Map(); // Store matched transactions
 
 // FETCH USDT TRANSACTIONS
 async function getUsdtTransactions() {
@@ -22,61 +24,80 @@ async function getUsdtTransactions() {
     return response.data.data;
 }
 
-// LOG TRANSACTION DETAILS
-function logTransaction(tx) {
-    const timestamp = tx.block_timestamp;
-    const id = tx.transaction_id;
-    const datetime = new Date(timestamp).toISOString();
-    const isDeposit = tx.to === DEPOSIT_ADDRESS;
-    const amount = (parseFloat(tx.value) * Math.pow(10, -tx.token_info.decimals)).toFixed(6);
-    const link = `https://tronscan.org/#/transaction/${id}`;
-    const otherKey = isDeposit ? 'From' : 'To';
-    const otherAccount = isDeposit ? tx.from : tx.to;
+// CHECK IF TRANSACTION MATCHES ANY PENDING DEPOSITS
+function checkTransactionMatch(tx) {
+    const txTimestamp = tx.block_timestamp;
+    
+    for (const [depositId, deposit] of pendingDeposits) {
+        // Only consider transactions that occurred after the deposit request
+        if (txTimestamp < deposit.timestamp) {
+            continue; // Skip this transaction as it's older than the deposit request
+        }
 
-    console.log(`
-Transaction Detected:
-- Amount: ${amount} USDT
-- Date: ${datetime}
-- Transaction ID: ${id}
-- ${otherKey}: ${otherAccount}
-- Link: ${link}
-    `);
+        // Check if the from address, to address, and amount all match
+        if (tx.from === deposit.address && 
+            tx.to === DEPOSIT_ADDRESS &&
+            tx.value === deposit.amount &&
+            !matchedTransactions.has(tx.transaction_id)) {
+            
+            // Save the matched transaction
+            matchedTransactions.set(tx.transaction_id, {
+                depositId,
+                amount: tx.value,
+                from: tx.from,
+                timestamp: tx.block_timestamp,
+                transactionId: tx.transaction_id
+            });
+
+            console.log(`Match found for deposit ${depositId}:`, {
+                amount: tx.value,
+                from: tx.from,
+                to: tx.to,
+                transactionId: tx.transaction_id,
+                timestamp: new Date(tx.block_timestamp).toISOString()
+            });
+
+            // Remove from pending since it's matched
+            pendingDeposits.delete(depositId);
+            return true;
+        }
+    }
+    return false;
 }
 
-// HANDLE USDT TRANSACTIONS
-async function handleUsdtTransactions(startTimestamp) {
-    while (true) {
+// MONITOR TRANSACTIONS FOR SPECIFIC DEPOSIT
+async function monitorDeposit(depositId) {
+    const startTime = Date.now();
+    const seenTransactions = []; 
+
+    while (Date.now() - startTime < MAX_MONITORING_TIME) {
         try {
             const transactions = await getUsdtTransactions();
+            
             for (const tx of transactions) {
-                const txTimestamp = tx.block_timestamp;
-                const id = tx.transaction_id;
-
-                if (!seenTransactions.has(id)) {
-                    seenTransactions.add(id);
-
-                    if (txTimestamp >= startTimestamp) {
-                        console.log('New transaction detected:', txTimestamp, 'Transaction ID:', id);
-                        logTransaction(tx);
-                    }
+                if (!seenTransactions.includes(tx.transaction_id)) {
+                    seenTransactions.push(tx.transaction_id);
+                    checkTransactionMatch(tx);
                 }
             }
         } catch (error) {
             console.error('Error fetching transactions:', error);
         }
 
-        console.log(`Sleeping for ${POLL_INTERVAL} minutes...`);
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL * 60 * 1000));
+        // Sleep for POLL_INTERVAL minutes
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL * 60 * 1000));
+        
+        // If no more pending deposits, stop monitoring
+        if (!pendingDeposits.has(depositId)) {
+            console.log(`Monitoring stopped for deposit ${depositId} - match found`);
+            return;
+        }
     }
-}
 
-// MAIN FUNCTION
-async function main() {
-    const timestamp = Date.now();
-    await handleUsdtTransactions(timestamp);
+    // Clean up after monitoring period expires
+    console.log(`Monitoring period expired for deposit ${depositId}`);
+    pendingDeposits.delete(depositId);
 }
-
-main();
 
 app.use(express.json());
 
@@ -85,21 +106,79 @@ app.get('/', (req, res) => {
 });
 
 app.post('/deposit', (req, res) => {
-  try {
-    const { address, amount } = req.body;
-    res.json({ 
-      success: true, 
-      depositAddress: DEPOSIT_ADDRESS,
-      message: `Please send ${amount} USDT to the provided address.`
+    try {
+        const { address, amount } = req.body;
+        
+        if (!address || !amount) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Both address and amount are required' 
+            });
+        }
+
+        const depositId = Date.now().toString();
+        const timestamp = Date.now();
+        
+        // Store the deposit request with raw amount value
+        pendingDeposits.set(depositId, {
+            address,
+            amount,
+            timestamp
+        });
+
+        // Start monitoring for this deposit
+        monitorDeposit(depositId);
+
+        res.json({ 
+            success: true,
+            depositId,
+            depositAddress: DEPOSIT_ADDRESS,
+            expectedAmount: amount,
+            timestamp,
+            message: `Monitoring for transactions of ${amount} USDT from ${address} to ${DEPOSIT_ADDRESS} for 5 minutes.`
+        });
+    } catch (error) {
+        console.error('Deposit error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'An error occurred processing your request.' 
+        });
+    }
+});
+
+app.get('/deposit/:depositId/status', (req, res) => {
+    const { depositId } = req.params;
+    
+    // Check if deposit is still pending
+    if (pendingDeposits.has(depositId)) {
+        const deposit = pendingDeposits.get(depositId);
+        return res.json({
+            status: 'pending',
+            message: 'Waiting for transaction',
+            expectedAmount: deposit.amount,
+            fromAddress: deposit.address,
+            requestTimestamp: deposit.timestamp
+        });
+    }
+
+    // Check if we have a matched transaction
+    const matchedTx = Array.from(matchedTransactions.values())
+        .find(tx => tx.depositId === depositId);
+
+    if (matchedTx) {
+        return res.json({
+            status: 'matched',
+            transaction: matchedTx
+        });
+    }
+
+    res.json({
+        status: 'expired',
+        message: 'Monitoring period expired without finding a match'
     });
-  } catch (error) {
-    console.error('Deposit error:', error);
-    res.status(500).json({ success: false, message: 'An error occurred processing your request.' });
-  }
 });
 
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+    console.log(`Server running at http://localhost:${port}`);
+    console.log('Ready to handle deposit requests and monitor transactions.');
 });
-
-console.log('Server is set up and ready to handle deposit requests.');
