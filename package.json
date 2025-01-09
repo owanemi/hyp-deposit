@@ -16,12 +16,5 @@
   "bugs": {
     "url": "https://github.com/owanemi/hyp-deposit/issues"
   },
-  "homepage": "https://github.com/owanemi/hyp-deposit#readme",
-  "dependencies": {
-    "@tronsocket/sdk": "^0.1.10",
-    "tronweb": "^6.0.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.7.2"
-  }
+  "homepage": "https://github.com/owanemi/hyp-deposit#readme"
 }

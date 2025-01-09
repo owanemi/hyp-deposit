@@ -1,98 +1,60 @@
-const express = require('express');
-const path = require("path");
-const axios = require('axios');
+import express from 'express';
+import fetch from 'node-fetch';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = 3000;
 
-// Config
-const CONTRACT = 'TQM1am5Ssf8phTwnoey1GMfHbM6CEeei72';
-const DEPOSIT_ADDRESS = 'TMDBGskDMtzA6MXSLrmxHPjwmPk6hsLVpJ';
-const POLL_INTERVAL = 30 * 1000; // 30 seconds
-const MAX_MONITOR_TIME = 5 * 60 * 1000; // 5 minutes
-const TRANSACTIONS_URL = `https://api.shasta.trongrid.io/v1/accounts/${DEPOSIT_ADDRESS}/transactions/trc20?contract_address=${CONTRACT}`;
-
-const pendingDeposits = new Map();
-const matchedTransactions = new Map();
-
-async function getTransactions() {
-    const { data } = await axios.get(TRANSACTIONS_URL);
-    return data.data;
-}
-
-function matchTransaction(tx) {
-    for (const [id, deposit] of pendingDeposits) {
-        if (tx.block_timestamp >= deposit.timestamp &&
-            tx.from === deposit.address &&
-            tx.to === DEPOSIT_ADDRESS &&
-            tx.value === deposit.amount &&
-            !matchedTransactions.has(tx.transaction_id)) {
-
-            matchedTransactions.set(tx.transaction_id, { ...tx, depositId: id });
-            pendingDeposits.delete(id);
-            console.log(`Matched deposit ${id}:`, tx);
-            return true;
-        }
-    }
-    return false;
-}
-
-async function monitorDeposit(depositId) {
-    const start = Date.now();
-    const seen = new Set();
-
-    while (Date.now() - start < MAX_MONITOR_TIME) {
-      console.log(`Checking for deposit matches for ID: ${depositId}`); // Log message
-        try {
-            const transactions = await getTransactions();
-            transactions.forEach(tx => {
-                if (!seen.has(tx.transaction_id)) {
-                    seen.add(tx.transaction_id);
-                    matchTransaction(tx);
-                }
-            });
-        } catch (err) {
-            console.error('Error fetching transactions:', err);
-        }
-        if (!pendingDeposits.has(depositId)) return;
-        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-    }
-    console.log(`Monitoring expired for deposit ${depositId}`);
-    pendingDeposits.delete(depositId);
-}
-
+app.use(express.static(__dirname));
 app.use(express.json());
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-
-app.post('/deposit', (req, res) => {
-    const { address, amount } = req.body;
-    if (!address || !amount) return res.status(400).json({ success: false, message: 'Address and amount are required' });
-
-    const depositId = Date.now().toString();
-    pendingDeposits.set(depositId, { address, amount, timestamp: Date.now() });
-
-    monitorDeposit(depositId);
-    res.json({
-        success: true,
-        depositId,
-        depositAddress: DEPOSIT_ADDRESS,
-        message: `Send EXACTLY ${amount} USDT from ${address} to ${DEPOSIT_ADDRESS}`
-    });
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.get('/deposit/:id/status', (req, res) => {
-    const depositId = req.params.id;
+app.post('/create-deposit', async (req, res) => {
+  const { priceAmount, orderId } = req.body;
+  const apiKey = "ZHPDVK9-MHGMA0T-M7RN834-BS5DGVJ";
 
-    if (pendingDeposits.has(depositId)) {
-        const { address, amount, timestamp } = pendingDeposits.get(depositId);
-        return res.json({ status: 'pending', amount, address, timestamp });
+  if (!apiKey) {
+    return res.status(500).json({ error: 'NOW_PAYMENTS_API_KEY is not set' });
+  }
+
+  try {
+    const response = await fetch('https://api.nowpayments.io/v1/payment', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        price_amount: priceAmount,
+        price_currency: 'usdttrc20',
+        pay_currency: 'usdttrc20',
+        ipn_callback_url: 'https://your-domain.com/api/nowpayments-callback',
+        order_id: orderId,
+        order_description: 'deposit',
+        is_fixed_rate: true,
+        is_fee_paid_by_user: true //this isn't working
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to create payment');
     }
 
-    const matched = Array.from(matchedTransactions.values()).find(tx => tx.depositId === depositId);
-    if (matched) return res.json({ status: 'matched', transaction: matched });
-
-    res.json({ status: 'expired', message: 'No match found within the monitoring period.' });
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to create payment' });
+  }
 });
 
-app.listen(port, () => console.log(`Server running at http://localhost:${port}`));
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
